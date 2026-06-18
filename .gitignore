@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+results.csv
+results_document.csv
+results_marker.csv
+results.json
+data/*.pdf
