@@ -1,0 +1,47 @@
+{
+  "document": "sample_intake.pdf",
+  "results": [
+    {
+      "method": "marker",
+      "extraction_seconds": 79.84,
+      "chars": 4141,
+      "words": 423,
+      "lines": 34,
+      "estimated_tokens": 1035,
+      "fields_populated": 12,
+      "fields_total": 12,
+      "completeness_pct": 100.0,
+      "llm_extraction_seconds": 15.03,
+      "llm_ran": true,
+      "error": ""
+    },
+    {
+      "method": "pypdf",
+      "extraction_seconds": 0.01,
+      "chars": 2228,
+      "words": 338,
+      "lines": 70,
+      "estimated_tokens": 557,
+      "fields_populated": 12,
+      "fields_total": 12,
+      "completeness_pct": 100.0,
+      "llm_extraction_seconds": 15.33,
+      "llm_ran": true,
+      "error": ""
+    },
+    {
+      "method": "pdfplumber",
+      "extraction_seconds": 0.1,
+      "chars": 2220,
+      "words": 334,
+      "lines": 36,
+      "estimated_tokens": 555,
+      "fields_populated": 12,
+      "fields_total": 12,
+      "completeness_pct": 100.0,
+      "llm_extraction_seconds": 13.29,
+      "llm_ran": true,
+      "error": ""
+    }
+  ]
+}
