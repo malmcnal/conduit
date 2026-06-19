@@ -38,8 +38,10 @@ AIRTABLE_API_URL = "https://api.airtable.com/v0"
 
 
 class AirtableClient:
-    def __init__(self, api_key: str, base_id: str, table_id: str = "Applications"):
+    def __init__(self, api_key: str, base_id: str, table_id: str = "Applications", view_id: str = ""):
         self.base_id = base_id
+        self.table_id = table_id
+        self.view_id = view_id
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -144,5 +146,11 @@ class AirtableClient:
         record_id = data["id"]
         return record_id, self._record_url(record_id)
 
+    def push(self, result: ProcessedApplication) -> tuple[str, str]:
+        """Unified push method — matches MondayClient interface."""
+        return self.create_record(result)
+
     def _record_url(self, record_id: str) -> str:
-        return f"https://airtable.com/{self.base_id}/{record_id}"
+        if self.view_id:
+            return f"https://airtable.com/{self.base_id}/{self.table_id}/{self.view_id}/{record_id}"
+        return f"https://airtable.com/{self.base_id}/{self.table_id}/{record_id}"

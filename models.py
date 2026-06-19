@@ -69,5 +69,5 @@ class ProcessedApplication(BaseModel):
     application: ApplicationRecord
     risk_assessment: RiskAssessment
     onboarding_summary: OnboardingSummary
-    airtable_record_id: str | None = None
-    airtable_record_url: str | None = None
+    record_id: str | None = None
+    record_url: str | None = None

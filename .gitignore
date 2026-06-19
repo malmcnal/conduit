@@ -5,5 +5,7 @@ __pycache__/
 results.csv
 results_document.csv
 results_marker.csv
+results_image.csv
 results.json
 data/*.pdf
+board_state.json

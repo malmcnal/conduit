@@ -1,19 +1,24 @@
 """
-pipeline.py — Crestview Capital Partners: AI-Powered Client Onboarding POC
+pipeline.py — Conduit: AI-Powered Document Intake Pipeline
 
 Entry point. Run with:
     python pipeline.py                                              # full CSV batch
     python pipeline.py --app APP-0303                              # single application by ID
-    python pipeline.py --skip-airtable                             # skip Airtable push (local test)
+    python pipeline.py --skip-backend                              # skip backend push (local test)
+    python pipeline.py --backend monday                            # use monday.com
+    python pipeline.py --backend airtable                          # use Airtable
     python pipeline.py --csv data/custom.csv                       # different CSV file
     python pipeline.py --document data/sample_intake_email.txt     # Stage 0: unstructured text
     python pipeline.py --marker-file data/sample_intake.pdf        # Stage 0: PDF via Marker
+
+Backend is auto-detected from environment if --backend is not specified.
+Airtable takes priority if both sets of keys are present.
 
 Pipeline stages per application (CSV path):
     1. Load CSV row → ApplicationRecord
     2. Stage 1: Risk assessment (LLM) → RiskAssessment
     3. Stage 2: Onboarding summary (LLM) → OnboardingSummary
-    4. Push to Airtable → record URL
+    4. Push to backend → record URL
 
 Pipeline stages for document intake (--document or --marker-file):
     0. Stage 0: Document → ApplicationRecord
@@ -21,7 +26,7 @@ Pipeline stages for document intake (--document or --marker-file):
          --marker-file:  PDF → Marker parses layout/tables/OCR → Claude extracts fields
     1. Stage 1: Risk assessment (LLM) → RiskAssessment
     2. Stage 2: Onboarding summary (LLM) → OnboardingSummary
-    3. Push to Airtable → record URL
+    3. Push to backend → record URL
 """
 
 import argparse
@@ -30,15 +35,13 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.text import Text
 from rich import box
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from config import get_anthropic_client, AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID
+from config import get_anthropic_client, get_backend_client, detect_backend
 from models import ApplicationRecord, ProcessedApplication
 from risk_assessment import assess_risk
 from onboarding_summary import generate_summary
-from airtable_client import AirtableClient
 from intake_processor import process_document
 
 console = Console()
@@ -50,15 +53,21 @@ RISK_COLOURS = {
     "CRITICAL": "bold red",
 }
 
+BACKEND_LABELS = {
+    "airtable": "Airtable",
+    "monday":   "monday.com",
+}
+
 
 # ── Display helpers ───────────────────────────────────────────────────────────
 
-def print_header(model: str = ""):
+def print_header(model: str = "", backend: str = ""):
+    label = BACKEND_LABELS.get(backend, backend) if backend else "no backend"
     console.print()
     console.print(Panel.fit(
-        "[bold white]Crestview Capital Partners[/bold white]\n"
-        "[dim]AI-Powered Client Onboarding Pipeline[/dim]\n"
-        f"[dim]Airtable  ·  {model}[/dim]",
+        "[bold white]Conduit[/bold white]\n"
+        "[dim]AI-Powered Document Intake Pipeline[/dim]\n"
+        f"[dim]{label}  ·  {model}[/dim]",
         border_style="blue",
         padding=(0, 2),
     ))
@@ -96,15 +105,14 @@ def print_application_result(result: ProcessedApplication, idx: int, total: int)
     if summ.reviewer_notes:
         console.print(f"  [dim]Notes: {summ.reviewer_notes}[/dim]")
 
-    if result.airtable_record_url:
+    if result.record_url:
         console.print()
-        console.print(f"  [bold]Airtable:[/bold] [link={result.airtable_record_url}]{result.airtable_record_url}[/link]")
+        console.print(f"  [bold]Record:[/bold] [link={result.record_url}]{result.record_url}[/link]")
 
     console.print()
 
 
 def print_intake_extraction(app: ApplicationRecord):
-    """Display Stage 0 extracted fields for human review before Stage 1 runs."""
     console.print(Panel(
         f"[bold]Stage 0 — Document Intake[/bold]  [dim]{app.application_id}[/dim]",
         border_style="cyan", padding=(0, 1),
@@ -180,23 +188,10 @@ def write_results(results: list[ProcessedApplication], path: str = "results.csv"
     import csv
 
     fieldnames = [
-        "application_id",
-        "company_name",
-        "industry",
-        "aum_usd",
-        "domicile",
-        "application_date",
-        "risk_level",
-        "risk_score",
-        "pep_flag",
-        "sar_flag",
-        "risk_factors",
-        "reasoning",
-        "recommended_action",
-        "summary",
-        "action_required",
-        "reviewer_notes",
-        "airtable_record_url",
+        "application_id", "company_name", "industry", "aum_usd", "domicile",
+        "application_date", "risk_level", "risk_score", "pep_flag", "sar_flag",
+        "risk_factors", "reasoning", "recommended_action", "summary",
+        "action_required", "reviewer_notes", "record_url",
     ]
 
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -220,41 +215,49 @@ def write_results(results: list[ProcessedApplication], path: str = "results.csv"
                 "summary":           r.onboarding_summary.summary,
                 "action_required":   r.onboarding_summary.action_required,
                 "reviewer_notes":    r.onboarding_summary.reviewer_notes,
-                "airtable_record_url": r.airtable_record_url or "",
+                "record_url":        r.record_url or "",
             })
 
     console.print(f"\n[dim]Results written to {path}[/dim]")
 
 
-# ── Pipeline helpers ──────────────────────────────────────────────────────────
+# ── Backend helper ────────────────────────────────────────────────────────────
 
-def _get_airtable_client(skip_airtable: bool) -> AirtableClient | None:
-    if skip_airtable:
-        return None
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        console.print("[yellow]⚠ AIRTABLE_API_KEY or AIRTABLE_BASE_ID not set — skipping Airtable push[/yellow]\n")
-        return None
+def _init_backend(backend: str | None, skip: bool):
+    """
+    Return an initialised backend client, or None if skipping / not configured.
+    backend=None means auto-detect from env.
+    """
+    if skip:
+        return None, None
+
+    resolved = backend or detect_backend()
+    if not resolved:
+        console.print("[yellow]⚠ No backend configured — skipping push[/yellow]\n")
+        return None, None
+
+    label = BACKEND_LABELS.get(resolved, resolved)
     try:
-        console.print("[dim]Connecting to Airtable…[/dim]")
-        client = AirtableClient(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID)
+        console.print(f"[dim]Connecting to {label}…[/dim]")
+        client = get_backend_client(resolved)
         client.setup()
-        console.print(f"[green]✓[/green] Airtable ready (base: {AIRTABLE_BASE_ID})\n")
-        return client
+        console.print(f"[green]✓[/green] {label} ready\n")
+        return client, resolved
     except Exception as e:
-        console.print(f"[yellow]⚠ Airtable setup failed: {e}[/yellow]")
-        console.print("[yellow]  Continuing without Airtable push[/yellow]\n")
-        return None
+        console.print(f"[yellow]⚠ {label} setup failed: {e}[/yellow]")
+        console.print(f"[yellow]  Continuing without {label} push[/yellow]\n")
+        return None, None
 
 
-def _push_to_airtable(airtable: AirtableClient | None, result: ProcessedApplication) -> None:
-    if not airtable:
+def _push(client, result: ProcessedApplication) -> None:
+    if not client:
         return
     try:
-        record_id, record_url = airtable.create_record(result)
-        result.airtable_record_id = record_id
-        result.airtable_record_url = record_url
+        record_id, record_url = client.push(result)
+        result.record_id  = record_id
+        result.record_url = record_url
     except Exception as e:
-        console.print(f"[yellow]  ⚠ Airtable push failed: {e}[/yellow]")
+        console.print(f"[yellow]  ⚠ Backend push failed: {e}[/yellow]")
 
 
 # ── CSV pipeline ──────────────────────────────────────────────────────────────
@@ -262,7 +265,8 @@ def _push_to_airtable(airtable: AirtableClient | None, result: ProcessedApplicat
 def run_pipeline(
     csv_path: str = "data/applications.csv",
     filter_id: str | None = None,
-    skip_airtable: bool = False,
+    backend: str | None = None,
+    skip_backend: bool = False,
 ) -> list[ProcessedApplication]:
 
     try:
@@ -272,7 +276,8 @@ def run_pipeline(
         console.print(f"[red]✗ {e}[/red]")
         sys.exit(1)
 
-    print_header(model)
+    client, resolved_backend = _init_backend(backend, skip_backend)
+    print_header(model, resolved_backend or "")
 
     console.print(f"[dim]Loading applications from {csv_path}…[/dim]")
     df = pd.read_csv(csv_path).fillna("")
@@ -304,19 +309,12 @@ def run_pipeline(
     console.print(f"[green]✓[/green] {len(applications)} application(s) loaded\n")
     console.print(f"[green]✓[/green] Anthropic ready (model: {model})\n")
 
-    airtable = _get_airtable_client(skip_airtable)
-
-    if airtable:
+    if client:
         before = len(applications)
-        applications = [
-            app for app in applications
-            if not airtable.find_existing(app.application_id)
-        ]
+        applications = [a for a in applications if not client.find_existing(a.application_id)]
         skipped = before - len(applications)
         if skipped:
-            console.print(
-                f"[yellow]⟳ {skipped} application(s) already in Airtable — skipping[/yellow]\n"
-            )
+            console.print(f"[yellow]⟳ {skipped} application(s) already in backend — skipping[/yellow]\n")
         if not applications:
             console.print("[green]✓ All applications already processed. Nothing to do.[/green]")
             return []
@@ -324,12 +322,8 @@ def run_pipeline(
     results: list[ProcessedApplication] = []
 
     for idx, app in enumerate(applications, 1):
-        with Progress(
-            SpinnerColumn(),
-            TextColumn(f"[dim]Processing {app.application_id}: {app.company_name}…"),
-            transient=True,
-            console=console,
-        ) as progress:
+        with Progress(SpinnerColumn(), TextColumn(f"[dim]Processing {app.application_id}: {app.company_name}…"),
+                      transient=True, console=console) as progress:
             progress.add_task("", total=None)
 
             try:
@@ -344,12 +338,8 @@ def run_pipeline(
                 console.print(f"[red]✗ Stage 2 failed for {app.application_id}: {e}[/red]")
                 continue
 
-            result = ProcessedApplication(
-                application=app,
-                risk_assessment=risk,
-                onboarding_summary=summary,
-            )
-            _push_to_airtable(airtable, result)
+            result = ProcessedApplication(application=app, risk_assessment=risk, onboarding_summary=summary)
+            _push(client, result)
 
         results.append(result)
         print_application_result(result, idx, len(applications))
@@ -357,11 +347,9 @@ def run_pipeline(
     if results:
         print_summary_table(results)
         write_results(results)
-
         high_risk = [r for r in results if r.risk_assessment.risk_level in ("HIGH", "CRITICAL")]
         pep_count = sum(1 for r in results if r.risk_assessment.pep_flag)
         sar_count = sum(1 for r in results if r.risk_assessment.sar_flag)
-
         console.print()
         console.print(Panel(
             f"[bold]Batch complete[/bold]  —  {len(results)} applications processed\n"
@@ -379,8 +367,10 @@ def run_pipeline(
 
 def run_document_pipeline(
     doc_path: str,
-    skip_airtable: bool = False,
+    backend: str | None = None,
+    skip_backend: bool = False,
 ) -> ProcessedApplication | None:
+
     try:
         anthropic_client, model = get_anthropic_client()
     except EnvironmentError as e:
@@ -388,7 +378,8 @@ def run_document_pipeline(
         console.print(f"[red]✗ {e}[/red]")
         sys.exit(1)
 
-    print_header(model)
+    client, resolved_backend = _init_backend(backend, skip_backend)
+    print_header(model, resolved_backend or "")
 
     try:
         with open(doc_path, "r", encoding="utf-8") as f:
@@ -399,51 +390,34 @@ def run_document_pipeline(
 
     console.print(f"[dim]Document: {doc_path}  ({len(raw_text):,} chars)[/dim]\n")
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[dim]Stage 0 — extracting structured fields from unstructured text…"),
-        transient=True,
-        console=console,
-    ) as progress:
+    with Progress(SpinnerColumn(), TextColumn("[dim]Stage 0 — extracting fields from document…"),
+                  transient=True, console=console) as progress:
         progress.add_task("", total=None)
         try:
             app = process_document(raw_text, anthropic_client, model, source_label=doc_path)
         except ValueError as e:
-            console.print(f"[red]✗ Stage 0 (document intake) failed: {e}[/red]")
+            console.print(f"[red]✗ Stage 0 failed: {e}[/red]")
             return None
 
     console.print(f"[green]✓[/green] Stage 0 complete\n")
     print_intake_extraction(app)
 
-    airtable = _get_airtable_client(skip_airtable)
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn(f"[dim]Stages 1 + 2: {app.company_name}…"),
-        transient=True,
-        console=console,
-    ) as progress:
+    with Progress(SpinnerColumn(), TextColumn(f"[dim]Stages 1 + 2: {app.company_name}…"),
+                  transient=True, console=console) as progress:
         progress.add_task("", total=None)
-
         try:
             risk = assess_risk(app, anthropic_client, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 1 failed: {e}[/red]")
             return None
-
         try:
             summary = generate_summary(app, risk, anthropic_client, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 2 failed: {e}[/red]")
             return None
 
-    result = ProcessedApplication(
-        application=app,
-        risk_assessment=risk,
-        onboarding_summary=summary,
-    )
-    _push_to_airtable(airtable, result)
-
+    result = ProcessedApplication(application=app, risk_assessment=risk, onboarding_summary=summary)
+    _push(client, result)
     print_application_result(result, 1, 1)
     write_results([result], "results_document.csv")
     return result
@@ -453,8 +427,10 @@ def run_document_pipeline(
 
 def run_marker_pipeline(
     pdf_path: str,
-    skip_airtable: bool = False,
+    backend: str | None = None,
+    skip_backend: bool = False,
 ) -> ProcessedApplication | None:
+
     try:
         anthropic_client, model = get_anthropic_client()
     except EnvironmentError as e:
@@ -462,7 +438,8 @@ def run_marker_pipeline(
         console.print(f"[red]✗ {e}[/red]")
         sys.exit(1)
 
-    print_header(model)
+    client, resolved_backend = _init_backend(backend, skip_backend)
+    print_header(model, resolved_backend or "")
 
     console.print(Panel(
         "[bold cyan]Stage 0 — Marker Edition[/bold cyan]\n"
@@ -486,64 +463,122 @@ def run_marker_pipeline(
     console.print(f"[green]✓[/green] Stage 0 (Marker) complete\n")
     print_intake_extraction(app)
 
-    airtable = _get_airtable_client(skip_airtable)
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn(f"[dim]Stages 1 + 2: {app.company_name}…"),
-        transient=True,
-        console=console,
-    ) as progress:
+    with Progress(SpinnerColumn(), TextColumn(f"[dim]Stages 1 + 2: {app.company_name}…"),
+                  transient=True, console=console) as progress:
         progress.add_task("", total=None)
-
         try:
             risk = assess_risk(app, anthropic_client, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 1 failed: {e}[/red]")
             return None
-
         try:
             summary = generate_summary(app, risk, anthropic_client, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 2 failed: {e}[/red]")
             return None
 
-    result = ProcessedApplication(
-        application=app,
-        risk_assessment=risk,
-        onboarding_summary=summary,
-    )
-    _push_to_airtable(airtable, result)
-
+    result = ProcessedApplication(application=app, risk_assessment=risk, onboarding_summary=summary)
+    _push(client, result)
     print_application_result(result, 1, 1)
     write_results([result], "results_marker.csv")
+    return result
+
+
+# ── Surya image pipeline ──────────────────────────────────────────────────────
+
+def run_image_pipeline(
+    image_path: str,
+    backend: str | None = None,
+    skip_backend: bool = False,
+) -> ProcessedApplication | None:
+    """
+    Run the full pipeline on a scanned or photographed document.
+
+    Stage 0 (Surya edition):
+      1. Surya VLM runs OCR on the image — handles handwriting, mixed layouts,
+         91 languages, and reading order detection.
+      2. Claude extracts compliance fields from the clean text output.
+
+    Stages 1 and 2 run identically to the other pipeline paths.
+
+    Requires surya v0.20.0 installed from ~/malachymcnally/surya and
+    llama.cpp available (brew install llama.cpp).
+
+    Run with:
+        python pipeline.py --image data/intake_scan.jpg
+        python pipeline.py --image data/intake_scan.jpg --skip-backend
+    """
+    try:
+        anthropic_client, model = get_anthropic_client()
+    except EnvironmentError as e:
+        print_header()
+        console.print(f"[red]✗ {e}[/red]")
+        sys.exit(1)
+
+    client, resolved_backend = _init_backend(backend, skip_backend)
+    print_header(model, resolved_backend or "")
+
+    console.print(Panel(
+        "[bold cyan]Stage 0 — Surya Edition[/bold cyan]\n"
+        "[dim]Image → Surya VLM (OCR + reading order) → clean text → Claude (field extraction)[/dim]",
+        border_style="cyan", padding=(0, 2),
+    ))
+    console.print()
+
+    from surya_intake import process_image
+
+    console.print(f"[dim]Image: {image_path}[/dim]")
+    try:
+        app = process_image(image_path, anthropic_client, model)
+    except FileNotFoundError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        return None
+    except ValueError as e:
+        console.print(f"[red]✗ Stage 0 (Surya) failed: {e}[/red]")
+        return None
+
+    console.print(f"[green]✓[/green] Stage 0 (Surya) complete\n")
+    print_intake_extraction(app)
+
+    with Progress(SpinnerColumn(), TextColumn(f"[dim]Stages 1 + 2: {app.company_name}…"),
+                  transient=True, console=console) as progress:
+        progress.add_task("", total=None)
+        try:
+            risk = assess_risk(app, anthropic_client, model)
+        except ValueError as e:
+            console.print(f"[red]✗ Stage 1 failed: {e}[/red]")
+            return None
+        try:
+            summary = generate_summary(app, risk, anthropic_client, model)
+        except ValueError as e:
+            console.print(f"[red]✗ Stage 2 failed: {e}[/red]")
+            return None
+
+    result = ProcessedApplication(application=app, risk_assessment=risk, onboarding_summary=summary)
+    _push(client, result)
+    print_application_result(result, 1, 1)
+    write_results([result], "results_image.csv")
     return result
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Crestview Client Onboarding Pipeline")
-    parser.add_argument("--app",            help="Process a single application by ID (e.g. APP-0303)")
-    parser.add_argument("--csv",            default="data/applications.csv", help="Path to applications CSV")
-    parser.add_argument("--document",       help="Process a single unstructured document (email, text, memo)")
-    parser.add_argument("--marker-file",    help="Process a PDF using Marker for document parsing (Stage 0 Marker edition)")
-    parser.add_argument("--skip-airtable",  action="store_true", help="Skip Airtable push")
+    parser = argparse.ArgumentParser(description="Conduit — AI-Powered Document Intake Pipeline")
+    parser.add_argument("--app",           help="Process a single application by ID")
+    parser.add_argument("--csv",           default="data/applications.csv", help="Path to applications CSV")
+    parser.add_argument("--document",      help="Process a single unstructured document (plain text)")
+    parser.add_argument("--marker-file",   help="Process a PDF using Marker (Stage 0 Marker edition)")
+    parser.add_argument("--image",         help="Process a scanned or photographed document using Surya OCR (Stage 0 Surya edition)")
+    parser.add_argument("--backend",       choices=["airtable", "monday"], help="Backend to push results to (default: auto-detect from env)")
+    parser.add_argument("--skip-backend",  action="store_true", help="Skip backend push entirely")
     args = parser.parse_args()
 
     if args.marker_file:
-        run_marker_pipeline(
-            pdf_path=args.marker_file,
-            skip_airtable=args.skip_airtable,
-        )
+        run_marker_pipeline(pdf_path=args.marker_file, backend=args.backend, skip_backend=args.skip_backend)
+    elif args.image:
+        run_image_pipeline(image_path=args.image, backend=args.backend, skip_backend=args.skip_backend)
     elif args.document:
-        run_document_pipeline(
-            doc_path=args.document,
-            skip_airtable=args.skip_airtable,
-        )
+        run_document_pipeline(doc_path=args.document, backend=args.backend, skip_backend=args.skip_backend)
     else:
-        run_pipeline(
-            csv_path=args.csv,
-            filter_id=args.app,
-            skip_airtable=args.skip_airtable,
-        )
+        run_pipeline(csv_path=args.csv, filter_id=args.app, backend=args.backend, skip_backend=args.skip_backend)
