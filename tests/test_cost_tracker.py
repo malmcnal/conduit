@@ -131,11 +131,11 @@ def test_proxy_returns_response_unchanged():
 def test_proxy_forwards_kwargs_untouched():
     fake = FakeClient()
     client = TrackingClient(fake, CostTracker("claude-opus-4-5"))
-    client.messages.create(model="m", max_tokens=512, temperature=0.1)
+    client.messages.create(model="m", max_tokens=512, stop_sequences=["END"])
     assert fake.messages.calls[0] == {
         "model": "m",
         "max_tokens": 512,
-        "temperature": 0.1,
+        "stop_sequences": ["END"],
     }
 
 

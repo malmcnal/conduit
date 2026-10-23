@@ -25,6 +25,11 @@ AIRTABLE_BASE_ID: str = os.getenv("AIRTABLE_BASE_ID", "")
 AIRTABLE_TABLE_ID: str = os.getenv("AIRTABLE_TABLE_ID", "Applications")
 AIRTABLE_VIEW_ID: str = os.getenv("AIRTABLE_VIEW_ID", "")
 
+# ── Notion ────────────────────────────────────────────────────────────────────
+
+NOTION_API_KEY: str = os.getenv("NOTION_API_KEY", "")
+NOTION_DATABASE_ID: str = os.getenv("NOTION_DATABASE_ID", "")
+
 # ── monday.com ────────────────────────────────────────────────────────────────
 
 MONDAY_API_KEY: str = os.getenv("MONDAY_API_KEY", "")
@@ -33,11 +38,20 @@ MONDAY_BOARD_ID: str | None = os.getenv("MONDAY_BOARD_ID")
 
 # ── Backend factory ───────────────────────────────────────────────────────────
 
+BACKENDS = ("airtable", "notion", "monday")
+
+
 def get_backend_client(backend: str):
     """
     Return an initialised backend client for the given backend name.
-    Both clients expose: setup(), find_existing(app_id), push(result).
+    All clients expose: setup(), find_existing(app_id), push(result).
     """
+    if backend == "notion":
+        if not NOTION_API_KEY or not NOTION_DATABASE_ID:
+            raise EnvironmentError("NOTION_API_KEY and NOTION_DATABASE_ID must both be set.")
+        from notion_db_client import NotionClient
+        return NotionClient(NOTION_API_KEY, NOTION_DATABASE_ID)
+
     if backend == "monday":
         if not MONDAY_API_KEY:
             raise EnvironmentError("MONDAY_API_KEY not set.")
@@ -50,17 +64,19 @@ def get_backend_client(backend: str):
         from airtable_client import AirtableClient
         return AirtableClient(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID, AIRTABLE_VIEW_ID)
 
-    raise ValueError(f"Unknown backend: '{backend}'. Choose 'airtable' or 'monday'.")
+    raise ValueError(f"Unknown backend: '{backend}'. Choose one of: {', '.join(BACKENDS)}.")
 
 
 def detect_backend() -> str | None:
     """
     Auto-detect which backend to use based on available env vars.
-    Returns 'airtable', 'monday', or None if neither is configured.
-    Prefers airtable if both are set.
+    Returns 'airtable', 'notion', 'monday', or None if none is configured.
+    Priority follows BACKENDS order when several are set.
     """
     if AIRTABLE_API_KEY and AIRTABLE_BASE_ID:
         return "airtable"
+    if NOTION_API_KEY and NOTION_DATABASE_ID:
+        return "notion"
     if MONDAY_API_KEY:
         return "monday"
     return None

@@ -1,0 +1,16 @@
+# Local OCR / layout models for the Marker (PDF) and Surya (image) paths,
+# plus the libraries benchmark.py compares against. Pinned to a known-good
+# set: torch 2.2.2 is the last release with Intel Mac wheels (it needs numpy < 2).
+#
+# marker-pdf 0.2.6 declares pdftext>=0.3.7, but those versions break it, so
+# pdftext has to be forced back afterwards, ignoring the declared range:
+#   pip install -r requirements-ocr.txt
+#   pip install --no-deps pdftext==0.3.4
+-r requirements.txt
+marker-pdf==0.2.6
+surya-ocr==0.4.5
+torch==2.2.2
+transformers==4.36.2
+numpy==1.26.4
+pypdf>=4.0.0
+pdfplumber>=0.11.0

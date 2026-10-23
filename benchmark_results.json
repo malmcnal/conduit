@@ -3,7 +3,7 @@
   "results": [
     {
       "method": "marker",
-      "extraction_seconds": 79.84,
+      "extraction_seconds": 87.37,
       "chars": 4141,
       "words": 423,
       "lines": 34,
@@ -11,7 +11,7 @@
       "fields_populated": 12,
       "fields_total": 12,
       "completeness_pct": 100.0,
-      "llm_extraction_seconds": 15.03,
+      "llm_extraction_seconds": 18.38,
       "llm_ran": true,
       "error": ""
     },
@@ -25,13 +25,13 @@
       "fields_populated": 12,
       "fields_total": 12,
       "completeness_pct": 100.0,
-      "llm_extraction_seconds": 15.33,
+      "llm_extraction_seconds": 16.74,
       "llm_ran": true,
       "error": ""
     },
     {
       "method": "pdfplumber",
-      "extraction_seconds": 0.1,
+      "extraction_seconds": 0.09,
       "chars": 2220,
       "words": 334,
       "lines": 36,
@@ -39,7 +39,7 @@
       "fields_populated": 12,
       "fields_total": 12,
       "completeness_pct": 100.0,
-      "llm_extraction_seconds": 13.29,
+      "llm_extraction_seconds": 17.92,
       "llm_ran": true,
       "error": ""
     }

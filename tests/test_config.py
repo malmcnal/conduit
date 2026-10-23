@@ -21,20 +21,22 @@ def test_unknown_backend_names_the_valid_options():
         config.get_backend_client("")
     message = str(exc.value)
     assert "airtable" in message
+    assert "notion" in message
     assert "monday" in message
 
 
 def test_detect_backend_returns_a_known_name_or_none():
     backend = config.detect_backend()
-    assert backend in {"airtable", "monday", None}
+    assert backend in {"airtable", "notion", "monday", None}
 
 
 def test_backend_clients_share_the_same_interface():
-    """Both clients must satisfy the contract the pipeline depends on."""
+    """Every client must satisfy the contract the pipeline depends on."""
     from airtable_client import AirtableClient
     from monday_client import MondayClient
+    from notion_db_client import NotionClient
 
-    for client_class in (AirtableClient, MondayClient):
+    for client_class in (AirtableClient, MondayClient, NotionClient):
         for method in ("setup", "find_existing", "push"):
             assert callable(getattr(client_class, method, None)), (
                 f"{client_class.__name__} is missing {method}()"

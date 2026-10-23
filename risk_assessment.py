@@ -82,7 +82,6 @@ Additional flags:
     response = client.messages.create(
         model=model,
         max_tokens=1024,
-        temperature=0.1,  # Low temperature — consistent, deterministic scoring
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )

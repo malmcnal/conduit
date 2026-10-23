@@ -9,3 +9,4 @@ results_image.csv
 results.json
 data/*.pdf
 board_state.json
+.venv/

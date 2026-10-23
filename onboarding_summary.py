@@ -79,7 +79,6 @@ Please write the compliance reviewer briefing.
     response = client.messages.create(
         model=model,
         max_tokens=1024,
-        temperature=0.2,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )

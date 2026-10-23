@@ -7,12 +7,15 @@ Entry point. Run with:
     python pipeline.py --skip-backend                              # skip backend push (local test)
     python pipeline.py --backend monday                            # use monday.com
     python pipeline.py --backend airtable                          # use Airtable
+    python pipeline.py --backend notion                            # use Notion
     python pipeline.py --csv data/custom.csv                       # different CSV file
     python pipeline.py --document data/sample_intake_email.txt     # Stage 0: unstructured text
     python pipeline.py --marker-file data/sample_intake.pdf        # Stage 0: PDF via Marker
+    python pipeline.py --image data/blackt_CP.jpeg                 # Stage 0: image via Claude vision
+    python pipeline.py --image data/scan.jpg --ocr surya           # Stage 0: image via Surya OCR
 
 Backend is auto-detected from environment if --backend is not specified.
-Airtable takes priority if both sets of keys are present.
+Priority when several are configured: Airtable, then Notion, then monday.com.
 
 Pipeline stages per application (CSV path):
     1. Load CSV row → ApplicationRecord
@@ -38,7 +41,8 @@ from rich.panel import Panel
 from rich import box
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from config import get_anthropic_client, get_backend_client, detect_backend
+from config import BACKENDS, get_anthropic_client, get_backend_client, detect_backend
+from cost_tracker import CostTracker, TrackingClient
 from models import ApplicationRecord, ProcessedApplication
 from risk_assessment import assess_risk
 from onboarding_summary import generate_summary
@@ -55,6 +59,7 @@ RISK_COLOURS = {
 
 BACKEND_LABELS = {
     "airtable": "Airtable",
+    "notion":   "Notion",
     "monday":   "monday.com",
 }
 
@@ -74,7 +79,7 @@ def print_header(model: str = "", backend: str = ""):
     console.print()
 
 
-def print_application_result(result: ProcessedApplication, idx: int, total: int):
+def print_application_result(result: ProcessedApplication, idx: int, total: int, cost_line: str = ""):
     app  = result.application
     risk = result.risk_assessment
     summ = result.onboarding_summary
@@ -108,6 +113,10 @@ def print_application_result(result: ProcessedApplication, idx: int, total: int)
     if result.record_url:
         console.print()
         console.print(f"  [bold]Record:[/bold] [link={result.record_url}]{result.record_url}[/link]")
+
+    if cost_line:
+        console.print()
+        console.print(f"  [dim]Cost   : {cost_line}[/dim]")
 
     console.print()
 
@@ -184,7 +193,11 @@ def print_summary_table(results: list[ProcessedApplication]):
 
 # ── Output file ──────────────────────────────────────────────────────────────
 
-def write_results(results: list[ProcessedApplication], path: str = "results.csv") -> None:
+def write_results(
+    results: list[ProcessedApplication],
+    path: str = "results.csv",
+    trackers: list[CostTracker] | None = None,
+) -> None:
     import csv
 
     fieldnames = [
@@ -192,30 +205,35 @@ def write_results(results: list[ProcessedApplication], path: str = "results.csv"
         "application_date", "risk_level", "risk_score", "pep_flag", "sar_flag",
         "risk_factors", "reasoning", "recommended_action", "summary",
         "action_required", "reviewer_notes", "record_url",
+        "input_tokens", "output_tokens", "estimated_cost_usd",
     ]
 
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for r in results:
+        for i, r in enumerate(results):
+            cost = trackers[i].summary() if trackers and i < len(trackers) else {}
             writer.writerow({
-                "application_id":    r.application.application_id,
-                "company_name":      r.application.company_name,
-                "industry":          r.application.industry,
-                "aum_usd":           r.application.aum_usd,
-                "domicile":          r.application.domicile,
-                "application_date":  r.application.application_date,
-                "risk_level":        r.risk_assessment.risk_level,
-                "risk_score":        r.risk_assessment.risk_score,
-                "pep_flag":          r.risk_assessment.pep_flag,
-                "sar_flag":          r.risk_assessment.sar_flag,
-                "risk_factors":      " | ".join(r.risk_assessment.risk_factors),
-                "reasoning":         r.risk_assessment.reasoning,
-                "recommended_action":r.risk_assessment.recommended_action,
-                "summary":           r.onboarding_summary.summary,
-                "action_required":   r.onboarding_summary.action_required,
-                "reviewer_notes":    r.onboarding_summary.reviewer_notes,
-                "record_url":        r.record_url or "",
+                "application_id":     r.application.application_id,
+                "company_name":       r.application.company_name,
+                "industry":           r.application.industry,
+                "aum_usd":            r.application.aum_usd,
+                "domicile":           r.application.domicile,
+                "application_date":   r.application.application_date,
+                "risk_level":         r.risk_assessment.risk_level,
+                "risk_score":         r.risk_assessment.risk_score,
+                "pep_flag":           r.risk_assessment.pep_flag,
+                "sar_flag":           r.risk_assessment.sar_flag,
+                "risk_factors":       " | ".join(r.risk_assessment.risk_factors),
+                "reasoning":          r.risk_assessment.reasoning,
+                "recommended_action": r.risk_assessment.recommended_action,
+                "summary":            r.onboarding_summary.summary,
+                "action_required":    r.onboarding_summary.action_required,
+                "reviewer_notes":     r.onboarding_summary.reviewer_notes,
+                "record_url":         r.record_url or "",
+                "input_tokens":       cost.get("input_tokens",       ""),
+                "output_tokens":      cost.get("output_tokens",      ""),
+                "estimated_cost_usd": cost.get("estimated_cost_usd", ""),
             })
 
     console.print(f"\n[dim]Results written to {path}[/dim]")
@@ -320,20 +338,24 @@ def run_pipeline(
             return []
 
     results: list[ProcessedApplication] = []
+    trackers: list[CostTracker] = []
 
     for idx, app in enumerate(applications, 1):
+        tracker = CostTracker(model)
+        tracked = TrackingClient(anthropic_client, tracker)
+
         with Progress(SpinnerColumn(), TextColumn(f"[dim]Processing {app.application_id}: {app.company_name}…"),
                       transient=True, console=console) as progress:
             progress.add_task("", total=None)
 
             try:
-                risk = assess_risk(app, anthropic_client, model)
+                risk = assess_risk(app, tracked, model)
             except ValueError as e:
                 console.print(f"[red]✗ Stage 1 failed for {app.application_id}: {e}[/red]")
                 continue
 
             try:
-                summary = generate_summary(app, risk, anthropic_client, model)
+                summary = generate_summary(app, risk, tracked, model)
             except ValueError as e:
                 console.print(f"[red]✗ Stage 2 failed for {app.application_id}: {e}[/red]")
                 continue
@@ -342,11 +364,14 @@ def run_pipeline(
             _push(client, result)
 
         results.append(result)
-        print_application_result(result, idx, len(applications))
+        trackers.append(tracker)
+        print_application_result(result, idx, len(applications), tracker.display_line())
 
     if results:
         print_summary_table(results)
-        write_results(results)
+        total_cost = sum(t.estimated_cost_usd for t in trackers)
+        total_tokens = sum(t.total_tokens for t in trackers)
+        write_results(results, trackers=trackers)
         high_risk = [r for r in results if r.risk_assessment.risk_level in ("HIGH", "CRITICAL")]
         pep_count = sum(1 for r in results if r.risk_assessment.pep_flag)
         sar_count = sum(1 for r in results if r.risk_assessment.sar_flag)
@@ -355,7 +380,8 @@ def run_pipeline(
             f"[bold]Batch complete[/bold]  —  {len(results)} applications processed\n"
             f"High/Critical risk: [red]{len(high_risk)}[/red]  |  "
             f"PEP flags: [red]{pep_count}[/red]  |  "
-            f"SAR indicators: [red]{sar_count}[/red]",
+            f"SAR indicators: [red]{sar_count}[/red]\n"
+            f"[dim]Total cost: ~${total_cost:.4f}  ({total_tokens:,} tokens)[/dim]",
             border_style="green" if not high_risk else "red",
             padding=(0, 2),
         ))
@@ -390,11 +416,14 @@ def run_document_pipeline(
 
     console.print(f"[dim]Document: {doc_path}  ({len(raw_text):,} chars)[/dim]\n")
 
+    tracker = CostTracker(model)
+    tracked = TrackingClient(anthropic_client, tracker)
+
     with Progress(SpinnerColumn(), TextColumn("[dim]Stage 0 — extracting fields from document…"),
                   transient=True, console=console) as progress:
         progress.add_task("", total=None)
         try:
-            app = process_document(raw_text, anthropic_client, model, source_label=doc_path)
+            app = process_document(raw_text, tracked, model, source_label=doc_path)
         except ValueError as e:
             console.print(f"[red]✗ Stage 0 failed: {e}[/red]")
             return None
@@ -406,20 +435,20 @@ def run_document_pipeline(
                   transient=True, console=console) as progress:
         progress.add_task("", total=None)
         try:
-            risk = assess_risk(app, anthropic_client, model)
+            risk = assess_risk(app, tracked, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 1 failed: {e}[/red]")
             return None
         try:
-            summary = generate_summary(app, risk, anthropic_client, model)
+            summary = generate_summary(app, risk, tracked, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 2 failed: {e}[/red]")
             return None
 
     result = ProcessedApplication(application=app, risk_assessment=risk, onboarding_summary=summary)
     _push(client, result)
-    print_application_result(result, 1, 1)
-    write_results([result], "results_document.csv")
+    print_application_result(result, 1, 1, tracker.display_line())
+    write_results([result], "results_document.csv", trackers=[tracker])
     return result
 
 
@@ -450,9 +479,12 @@ def run_marker_pipeline(
 
     from marker_intake import process_pdf
 
+    tracker = CostTracker(model)
+    tracked = TrackingClient(anthropic_client, tracker)
+
     console.print(f"[dim]PDF: {pdf_path}[/dim]")
     try:
-        app = process_pdf(pdf_path, anthropic_client, model)
+        app = process_pdf(pdf_path, tracked, model)
     except FileNotFoundError as e:
         console.print(f"[red]✗ {e}[/red]")
         return None
@@ -467,46 +499,53 @@ def run_marker_pipeline(
                   transient=True, console=console) as progress:
         progress.add_task("", total=None)
         try:
-            risk = assess_risk(app, anthropic_client, model)
+            risk = assess_risk(app, tracked, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 1 failed: {e}[/red]")
             return None
         try:
-            summary = generate_summary(app, risk, anthropic_client, model)
+            summary = generate_summary(app, risk, tracked, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 2 failed: {e}[/red]")
             return None
 
     result = ProcessedApplication(application=app, risk_assessment=risk, onboarding_summary=summary)
     _push(client, result)
-    print_application_result(result, 1, 1)
-    write_results([result], "results_marker.csv")
+    print_application_result(result, 1, 1, tracker.display_line())
+    write_results([result], "results_marker.csv", trackers=[tracker])
     return result
 
 
-# ── Surya image pipeline ──────────────────────────────────────────────────────
+# ── Image pipeline (Claude vision or Surya) ───────────────────────────────────
+
+IMAGE_STAGE0 = {
+    "claude": ("Claude Vision", "Image → Claude (reads scan/photo/handwriting + extracts fields in one call)"),
+    "surya":  ("Surya", "Image → Surya OCR (line detection + recognition) → text → Claude (field extraction)"),
+}
+
 
 def run_image_pipeline(
     image_path: str,
+    ocr: str = "claude",
     backend: str | None = None,
     skip_backend: bool = False,
 ) -> ProcessedApplication | None:
     """
-    Run the full pipeline on a scanned or photographed document.
+    Run the full pipeline on a scanned, photographed or handwritten document.
 
-    Stage 0 (Surya edition):
-      1. Surya VLM runs OCR on the image — handles handwriting, mixed layouts,
-         91 languages, and reading order detection.
-      2. Claude extracts compliance fields from the clean text output.
+    Stage 0, ocr="claude" (default):
+      Claude reads the image directly and extracts compliance fields in one call.
+      Handles handwriting, which Surya 0.4.5 cannot.
+
+    Stage 0, ocr="surya":
+      1. Surya 0.4.5 runs OCR locally — good on printed scans, poor on handwriting.
+      2. Claude extracts compliance fields from the text output.
 
     Stages 1 and 2 run identically to the other pipeline paths.
 
-    Requires surya v0.20.0 installed from ~/malachymcnally/surya and
-    llama.cpp available (brew install llama.cpp).
-
     Run with:
-        python pipeline.py --image data/intake_scan.jpg
-        python pipeline.py --image data/intake_scan.jpg --skip-backend
+        python pipeline.py --image data/blackt_CP.jpeg
+        python pipeline.py --image data/intake_scan.jpg --ocr surya --skip-backend
     """
     try:
         anthropic_client, model = get_anthropic_client()
@@ -518,46 +557,53 @@ def run_image_pipeline(
     client, resolved_backend = _init_backend(backend, skip_backend)
     print_header(model, resolved_backend or "")
 
+    edition, flow = IMAGE_STAGE0[ocr]
     console.print(Panel(
-        "[bold cyan]Stage 0 — Surya Edition[/bold cyan]\n"
-        "[dim]Image → Surya VLM (OCR + reading order) → clean text → Claude (field extraction)[/dim]",
+        f"[bold cyan]Stage 0 — {edition} Edition[/bold cyan]\n"
+        f"[dim]{flow}[/dim]",
         border_style="cyan", padding=(0, 2),
     ))
     console.print()
 
-    from surya_intake import process_image
+    if ocr == "surya":
+        from surya_intake import process_image
+    else:
+        from vision_intake import process_image
+
+    tracker = CostTracker(model)
+    tracked = TrackingClient(anthropic_client, tracker)
 
     console.print(f"[dim]Image: {image_path}[/dim]")
     try:
-        app = process_image(image_path, anthropic_client, model)
+        app = process_image(image_path, tracked, model)
     except FileNotFoundError as e:
         console.print(f"[red]✗ {e}[/red]")
         return None
     except ValueError as e:
-        console.print(f"[red]✗ Stage 0 (Surya) failed: {e}[/red]")
+        console.print(f"[red]✗ Stage 0 ({edition}) failed: {e}[/red]")
         return None
 
-    console.print(f"[green]✓[/green] Stage 0 (Surya) complete\n")
+    console.print(f"[green]✓[/green] Stage 0 ({edition}) complete\n")
     print_intake_extraction(app)
 
     with Progress(SpinnerColumn(), TextColumn(f"[dim]Stages 1 + 2: {app.company_name}…"),
                   transient=True, console=console) as progress:
         progress.add_task("", total=None)
         try:
-            risk = assess_risk(app, anthropic_client, model)
+            risk = assess_risk(app, tracked, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 1 failed: {e}[/red]")
             return None
         try:
-            summary = generate_summary(app, risk, anthropic_client, model)
+            summary = generate_summary(app, risk, tracked, model)
         except ValueError as e:
             console.print(f"[red]✗ Stage 2 failed: {e}[/red]")
             return None
 
     result = ProcessedApplication(application=app, risk_assessment=risk, onboarding_summary=summary)
     _push(client, result)
-    print_application_result(result, 1, 1)
-    write_results([result], "results_image.csv")
+    print_application_result(result, 1, 1, tracker.display_line())
+    write_results([result], "results_image.csv", trackers=[tracker])
     return result
 
 
@@ -569,15 +615,16 @@ if __name__ == "__main__":
     parser.add_argument("--csv",           default="data/applications.csv", help="Path to applications CSV")
     parser.add_argument("--document",      help="Process a single unstructured document (plain text)")
     parser.add_argument("--marker-file",   help="Process a PDF using Marker (Stage 0 Marker edition)")
-    parser.add_argument("--image",         help="Process a scanned or photographed document using Surya OCR (Stage 0 Surya edition)")
-    parser.add_argument("--backend",       choices=["airtable", "monday"], help="Backend to push results to (default: auto-detect from env)")
+    parser.add_argument("--image",         help="Process a scanned, photographed or handwritten document image")
+    parser.add_argument("--ocr",           choices=["claude", "surya"], default="claude", help="How --image is read: Claude vision (default) or local Surya OCR")
+    parser.add_argument("--backend",       choices=BACKENDS, help="Backend to push results to (default: auto-detect from env)")
     parser.add_argument("--skip-backend",  action="store_true", help="Skip backend push entirely")
     args = parser.parse_args()
 
     if args.marker_file:
         run_marker_pipeline(pdf_path=args.marker_file, backend=args.backend, skip_backend=args.skip_backend)
     elif args.image:
-        run_image_pipeline(image_path=args.image, backend=args.backend, skip_backend=args.skip_backend)
+        run_image_pipeline(image_path=args.image, ocr=args.ocr, backend=args.backend, skip_backend=args.skip_backend)
     elif args.document:
         run_document_pipeline(doc_path=args.document, backend=args.backend, skip_backend=args.skip_backend)
     else:

@@ -1,0 +1,57 @@
+{
+  "version": "0.2.0",
+  "inputs": [
+    {
+      "id": "appId",
+      "type": "promptString",
+      "description": "Application ID (e.g. DOC-20260101-001)"
+    }
+  ],
+  "configurations": [
+    {
+      "name": "Pipeline: PDF via Marker (no backend push)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline.py",
+      "args": ["--marker-file", "data/sample_intake.pdf", "--skip-backend"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Pipeline: PDF via Marker (push to backend)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline.py",
+      "args": ["--marker-file", "data/sample_intake.pdf"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Pipeline: CSV batch",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline.py",
+      "args": ["--skip-backend"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Pipeline: single application by ID",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline.py",
+      "args": ["--app", "${input:appId}", "--skip-backend"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Benchmark: extraction only (no LLM calls)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/benchmark.py",
+      "args": ["data/sample_intake.pdf", "--no-llm"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

@@ -101,26 +101,44 @@ def process_document(
     Raises:
         ValueError: If the LLM response cannot be parsed or validated.
     """
-    today = date.today().isoformat()
-
-    user_message = f"""Today's date is {today}. Use this when generating application IDs or interpreting relative dates.
-
-Extract all client application information from the document below and return it as a structured JSON record.
-
-For fields that are genuinely absent, use your best inference where reasonable,
-or write 'Not stated' for text fields. Never leave additional_flags empty if there
-is anything compliance-relevant in the document — err on the side of flagging more.
+    user_message = f"""{extraction_instructions("the document below")}
 
 ---DOCUMENT START---
 {raw_text}
 ---DOCUMENT END---"""
 
+    return extract_record(user_message, client, model, source_label)
+
+
+def extraction_instructions(source: str) -> str:
+    today = date.today().isoformat()
+    return f"""Today's date is {today}. Use this when generating application IDs or interpreting relative dates.
+
+Extract all client application information from {source} and return it as a structured JSON record.
+
+For fields that are genuinely absent, use your best inference where reasonable,
+or write 'Not stated' for text fields. Never leave additional_flags empty if there
+is anything compliance-relevant in the document — err on the side of flagging more."""
+
+
+def extract_record(
+    content: str | list[dict],
+    client: anthropic.Anthropic,
+    model: str,
+    source_label: str = "document",
+) -> ApplicationRecord:
+    """
+    Send one Stage 0 request and validate the response as an ApplicationRecord.
+
+    `content` is either a plain-text user message or a list of content blocks
+    (e.g. an image block plus instructions), so every Stage 0 path shares the
+    same system prompt and the same validation boundary.
+    """
     response = client.messages.create(
         model=model,
         max_tokens=1024,
-        temperature=0.1,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
+        messages=[{"role": "user", "content": content}],
     )
 
     raw = response.content[0].text.strip()
