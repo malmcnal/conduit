@@ -298,7 +298,12 @@ def run_pipeline(
     print_header(model, resolved_backend or "")
 
     console.print(f"[dim]Loading applications from {csv_path}…[/dim]")
-    df = pd.read_csv(csv_path).fillna("")
+    try:
+        df = pd.read_csv(csv_path).fillna("")
+    except FileNotFoundError:
+        console.print(f"[red]✗ CSV not found: {csv_path}[/red]")
+        console.print("[dim]  Pass --csv PATH, or use --document / --marker-file / --image for a single document.[/dim]")
+        sys.exit(1)
     if filter_id:
         df = df[df["application_id"] == filter_id]
         if df.empty:

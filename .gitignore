@@ -8,5 +8,6 @@ results_marker.csv
 results_image.csv
 results.json
 data/*.pdf
+!data/sample_intake.pdf
 board_state.json
 .venv/
